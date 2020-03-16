@@ -1,0 +1,335 @@
+---
+title: "COVID-19"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: cosmo
+    orientation: rows
+    vertical_layout: scroll
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(leaflet)
+library(plotly)
+library(stringr)
+library(RCurl)
+library(tidyverse)
+library(data.table)
+library(maps)
+library(geojson)
+library(geojsonio)
+library(geojsonlint)
+
+master_dat <- read.csv("who_covid_19_sit_rep_time_series.csv")
+confirmed <- read.csv("time_series_19-covid-Confirmed.csv")
+deaths <- read.csv("time_series_19-covid-Deaths.csv")
+recovered <- read.csv("time_series_19-covid-Recovered.csv")
+
+# calculate global trend on confirmed cases
+dates <- seq(as.Date("2020/1/22"), as.Date("2020/3/9"), "days")
+tot_confirmed <- apply(confirmed[5:52], 2, sum)
+confirmed_trend <- data.frame(tot_confirmed) %>%
+        mutate(date = dates)
+colnames(confirmed_trend) <- c("Cases", "Date")
+
+# calculate global trend on recovered cases
+tot_recovered <- apply(recovered[5:52], 2, sum)
+recovered_trend <- data.frame(tot_recovered) %>%
+        mutate(date = dates)
+colnames(recovered_trend) <- c("Cases", "Date")
+
+# calculate global trend on death cases
+tot_deaths <- apply(deaths[5:52], 2, sum)
+deaths_trend <- data.frame(tot_recovered) %>%
+        mutate(date = dates)
+colnames(deaths_trend) <- c("Cases", "Date")
+
+# append all three datasets together 
+combined <- c(confirmed[ ,52], recovered[ ,52], deaths[ ,52])
+test_dat <- matrix(combined, nrow = 266, ncol = 3)
+test_dat <- as.data.frame(test_dat)
+combined_dat <- cbind(confirmed$Province.State, confirmed$Country.Region, test_dat)
+colnames(combined_dat) <- c("Province.State", "Country.Region", "Confirmed", "Recovered", "Deaths")
+
+# US dataset
+us <- filter(combined_dat, Country.Region == "US")
+
+# us confirmed trend data
+us_confirmed <- filter(confirmed, Country.Region == "US")
+tot_us_confirmed <- apply(us_confirmed[5:52], 2, sum)
+us_confirmed_trend <- data.frame(tot_us_confirmed) %>%
+        mutate(date = dates)
+colnames(us_confirmed_trend) <- c("Cases", "Date")
+
+# us recovered trend data
+us_recovered <- filter(recovered, Country.Region == "US")
+tot_us_recovered <- apply(us_recovered[5:52], 2, sum)
+
+# us death trend data
+us_death <- filter(deaths, Country.Region == "US")
+tot_us_death <- apply(us_death[5:52], 2, sum)
+
+```
+World Overview
+=====================================  
+
+Row {data-height=650}
+--------------------------------------------
+### World prevalence
+    
+```{r}
+
+# map of confirmed cases up till 3/5/2020
+leaflet() %>% 
+  addTiles() %>% 
+  addCircleMarkers(confirmed$Long, 
+                   confirmed$Lat, 
+                   radius = sqrt(confirmed$X3.9.20)/5,
+                   fillColor = '#BA55D3',
+                   color = '#800080',
+                   weight = 3,
+                   fill = T,
+                   fillOpacity = 0.6,
+                   opacity = 0.6,
+                   popup = paste(confirmed$Country.Region,
+                                 confirmed$Province.State, 
+                                 sep = " ", ": ",
+                                 confirmed$X3.9.20))
+
+```
+
+Row {data-height=250}
+--------------------------------------------
+### Worldwide cases
+
+```{r}
+
+tot_rank <- combined_dat[order(-combined_dat$Confirmed), ]
+DT::renderDataTable({
+DT::datatable(tot_rank[1:50, ],  rownames = FALSE, options = list(scrollY = '300px'))
+})
+
+```
+
+### Total confirmed and recovered cases globally
+
+```{r}
+# plot plotly graph: cases by date
+trend <- plot_ly(confirmed_trend, x = ~Date, y = ~Cases, type = 'scatter', mode = 'lines+markers', name = 'Total confirmed') %>%
+        add_trace(y = ~tot_recovered, name = 'Total recovered', mode = 'lines+markers') %>%
+        layout(legend = list(x = 0.05, y = 0.9))
+        
+trend
+```   
+
+### Total confirmed, recovered, and death cases in the US
+    
+```{r}
+# plot plotly graph: cases by date
+us_trend <- plot_ly(us_confirmed_trend, x = ~Date, y = ~Cases, type = 'scatter', mode = 'lines+markers', name = 'US confirmed') %>%
+  add_trace(y = ~tot_us_recovered, name = 'US recovered', mode = 'lines+markers') %>%
+  add_trace(y = ~tot_us_death, name = 'US deaths', mode = 'lines+markers') %>%
+  layout(legend = list(x = 0.1, y = 0.95))
+        
+us_trend
+```
+
+US Overview
+===================================== 
+
+Inputs {.sidebar}
+-----------------------------------------------
+#### Status in the US: 
+```{r}
+# Data pre-processing for US cases as of March 15
+COVID19_March_15_case_count = read.csv("COVID19_March_15_case_count.csv")
+US1 = filter(COVID19_March_15_case_count, Country.Region == "US") 
+setnames(US1, "Province.State", "States")
+US2 = select(US1, States, Confirmed, Deaths, Recovered, Latitude, Longitude)
+US2 = US2[order(US2$States),]
+US2 = US2[-c(9,13, 14, 51),]
+
+
+selectInput("state", label = "Select a state in the US:",
+            choices = US2$States)
+selectInput("type", label = "Select a case type:",
+            choices = c("Confirmed", "Recovered", "Deaths"))
+```
+
+#### Total number of people:
+
+```{r}
+
+renderText({
+  fil_dat <- filter(US2, States == as.character(input$state))
+  fil_dat[1, as.character(input$type)]
+})
+
+```
+
+..............................................
+
+##### **Note:** 
+Case information has only been updated till **<u>March 15, 2020</u>**. For more up-to-date information, please visit the [CDC website](https://www.cdc.gov/coronavirus/2019-ncov/cases-in-us.html)
+
+
+Row {data-height=650}
+-------------------------------------
+
+### Distribution of cases in the US by state
+```{r}
+
+# Get the US map data:
+url <- "http://leafletjs.com/examples/choropleth/us-states.js"
+
+# Read it as text file:
+doc <- readLines(url)
+
+# remove the javascript assignment at the front 
+doc2 <- gsub("var statesData = ", "", doc)
+
+# write out as a temp file and read
+write(doc2, file = "tempgeo.json")
+states <- geojson_read("tempgeo.json", what = "sp")
+
+# Match states in json file with cases in US2:
+a = as.data.frame(states$name)
+colnames(a) = "States"
+b = as.data.frame(select(US2, States, Confirmed, Deaths, Recovered))
+c = left_join(a, b, by  = "States")
+states$density = c$Confirmed
+
+
+# Create interactive labels for leaflet graph
+labels <- sprintf(
+  "<strong>%s</strong><br/>%s Confirmed <br/>%s Deaths<br/>%s Recovered",
+  c$States, c$Confirmed, c$Deaths, c$Recovered) %>% 
+  lapply(htmltools::HTML)
+
+bins = c(0, 10, 20, 30, 40, 60, 80, 100, 200,400, 600, 800)
+
+pal <- colorBin("YlOrRd", domain = states$density, bins = bins)
+
+# create a leaflet map on which we will build
+leaf <- leaflet(states) %>%
+    setView(-96, 37.8, 4) %>%
+    addTiles() %>%
+addProviderTiles("MapBox", options = providerTileOptions(
+    id = "mapbox.light",
+    accessToken = Sys.getenv('MAPBOX_ACCESS_TOKEN'))) %>%
+addPolygons(fillColor = ~pal(states$density), weight = 2,
+  opacity = 1,
+  color = "white",
+  dashArray = "3",
+  fillOpacity = 0.7,label = labels) %>%
+addLegend(pal = pal, values = ~states$density, opacity = 0.7, title = NULL,
+  position = "bottomright")
+leaf
+
+```
+
+
+Row {data-height=350}
+----------------------------------------
+### Public Health Laboratory Testing for COVID-19
+```{r}
+COVID19_US_Testing = read.csv("COVID19_US_Testing.csv")
+states2 = states
+states2$density = COVID19_US_Testing$Have_test
+
+pal2 <- colorFactor(palette = c("lightgreen", "red"), COVID19_US_Testing$Have_test)
+
+# create a leaflet map on which we will build
+labels2 <- sprintf(
+  "<strong>%s<br/></strong>%s",
+  states2$name, states2$density) %>% 
+  lapply(htmltools::HTML)
+
+leaf2 <- leaflet(states2) %>%
+    setView(-96, 37.8, 4) %>%
+    addTiles() %>%
+addProviderTiles("MapBox", options = providerTileOptions(
+    id = "mapbox.light",
+    accessToken = Sys.getenv('MAPBOX_ACCESS_TOKEN'))) %>%
+addPolygons(stroke = FALSE, smoothFactor = 0.2, color = pal2(COVID19_US_Testing$Have_test), weight = 2,
+  opacity = 1,
+  dashArray = "3",
+  fillOpacity = 0.7,label = labels2) %>%
+
+addLegend(pal = pal2, values = ~COVID19_US_Testing$Have_test, opacity = 0.7, title = NULL,
+  position = "bottomright")
+leaf2
+
+```
+
+### Cases of COVID-19 by sources of exposure in the US
+```{r }
+#Data was obtained from the CDC on 03/15/2020:
+exposure = data.frame("Sources of Exposure" = c("Travel-related", "Close contact", "Under investigation"), Value = c(138, 129, 1362), Percent = c(8.47, 7.92, 83.6))
+exposure = exposure[order(exposure$Sources.of.Exposure),]
+
+pie = ggplot(exposure, aes(x = "", y= Percent, fill = Sources.of.Exposure)) + 
+  geom_bar(width = 1, stat = 'identity') +
+  coord_polar("y") +
+  scale_fill_brewer(name="Sources of exposure for confirmed cases", labels = c("Travel-related 138 cases", "Close contact 129 cases","Under investigation 1362 cases"), palette = 'Oranges') + 
+  theme(axis.text.x=element_blank(),  legend.text=element_text(size=10)) + theme_void() +
+  geom_text(aes(label = paste0((Percent), "%")),
+              position = position_stack(vjust = 0.5)) 
+
+
+pie 
+
+
+```
+
+
+Row {data-height=100}
+-------------------------------------
+### Updates
+Data was last updated March 15th, 2020.<br />
+According to the CDC, as of the morning of March 15, 84 state and local public health laboratories in 50 states, the District of Columbia, and Guam have successfully verified COVID-19 diagnostic tests and are offering testing.
+
+
+Symptoms and Other Information
+===================================== 
+
+Row
+-------------------------------------
+### Outbreak Overview 
+
+**Background:**
+The “coronavirus disease 2019” (COVID-19) was first detected as a pneumonia of unknown cause Wuhan, China on December 31, 2019. Since then, a total of 105,820 cases have been confirmed globally in more than 90 locations.  The outbreak was declared a Public Health Emergency of International Concern by the World Health Organization (WHO) on January 30, 2020 [^1].
+
+**Source and spread:**
+Coronaviruses are a large family of viruses that are common in many different species of animals, including camels, cattle, cats, and bats. In rare cases, the animal virus transmitted to human can initiate human-to-human transmission. MERS-CoV, SARS-CoV, and now named SARS-CoV-2 are examples of this kind of transmission. It was believed that this outbreak originated form a seafood and live animal market Wuhan, China. However, community spread with unknown sources in the US has added complexity to tracing down the origin of this outbreak [^2]. 
+
+**Warning Signs:** <br />
+1. Difficulty breathing or shortness of breath <br />
+2. Persistent pain or pressure in the chest <br />
+3. New confusion or inability to arouse <br />
+4. Bluish lips or face <br />
+
+**CDC Recommendations: **
+
+1. Take everyday precautions:
+    - Wash your hands often with soap and water for at least 20 seconds
+    - Use hand sanitizer that contains at least 60% alcohol. 
+    - Avoid touching your face, nose, eye, etc.
+    - Clean and disinfect your home to remove germ.
+2. If COVID-19 is spreading in your community, stay at home as much as possible. 
+3. Consult with your health care providers for more information about monitoring symptoms suggestive of COVID-19
+4. Have supplies on hand. Including medications, household items, and groceries. 
+
+
+Row
+-------------------------------------
+### References and notes 
+For more information, please refer to: [CDC COVID-19](https://www.cdc.gov/coronavirus/2019-nCoV/index.html), [COVID-19 fact sheet](https://www.cdc.gov/coronavirus/2019-ncov/specific-groups/high-risk-complications.html), [WHO COVID-19](https://www.who.int/emergencies/diseases/novel-coronavirus-2019/events-as-they-happen)
+
+
+
